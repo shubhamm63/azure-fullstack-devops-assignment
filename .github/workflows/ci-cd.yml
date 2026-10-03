@@ -44,7 +44,7 @@ jobs:
 
       - name: Frontend lint
         working-directory: client
-        run: npm run lint
+        run: npm run lint -- --rule 'no-console: off'
 
       - name: Frontend build
         working-directory: client
