@@ -1,0 +1,241 @@
+name: Fullstack CI/CD
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  ACR_LOGIN_SERVER: acrfullstackdevops2026.azurecr.io
+  RESOURCE_GROUP: rg-docker-fullstack-demo
+  BACKEND_APP: app-fullstack-backend-2026
+  FRONTEND_APP: app-fullstack-frontend-2026
+
+jobs:
+
+  # -----------------------------
+  # CI - Pull Request Validation
+  # -----------------------------
+  ci:
+    name: CI Validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: client
+        run: npm ci
+
+      - name: Frontend lint
+        working-directory: client
+        run: npm run lint
+
+      - name: Frontend build
+        working-directory: client
+        run: npm run build
+
+      - name: Backend dependency audit
+        working-directory: server
+        run: npm audit --audit-level=high
+
+      - name: Frontend dependency audit
+        working-directory: client
+        run: npm audit --audit-level=high
+
+
+  # -----------------------------
+  # Build and Security Scan
+  # -----------------------------
+  build-and-scan:
+    name: Build and Scan Docker Images
+    if: github.event_name == 'push'
+    needs: ci
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build backend image
+        run: |
+          docker build \
+            -t ${{ env.ACR_LOGIN_SERVER }}/backend:${{ github.sha }} \
+            ./server
+
+      - name: Build frontend image
+        run: |
+          docker build \
+            --build-arg VITE_SERVER_URL=https://${{ env.BACKEND_APP }}.azurewebsites.net \
+            -t ${{ env.ACR_LOGIN_SERVER }}/frontend:${{ github.sha }} \
+            ./client
+
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@v0.2.3
+
+      - name: Scan backend image
+        run: |
+          trivy image \
+            --severity HIGH,CRITICAL \
+            --exit-code 1 \
+            ${{ env.ACR_LOGIN_SERVER }}/backend:${{ github.sha }}
+
+      - name: Scan frontend image
+        run: |
+          trivy image \
+            --severity HIGH,CRITICAL \
+            --exit-code 1 \
+            ${{ env.ACR_LOGIN_SERVER }}/frontend:${{ github.sha }}
+
+
+  # -----------------------------
+  # Push Images to Azure ACR
+  # -----------------------------
+  push:
+    name: Push Images to ACR
+    if: github.event_name == 'push'
+    needs: build-and-scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Login to ACR
+        run: |
+          az acr login --name acrfullstackdevops2026
+
+      - name: Build and push backend
+        run: |
+          docker build \
+            -t ${{ env.ACR_LOGIN_SERVER }}/backend:${{ github.sha }} \
+            ./server
+
+          docker push \
+            ${{ env.ACR_LOGIN_SERVER }}/backend:${{ github.sha }}
+
+      - name: Build and push frontend
+        run: |
+          docker build \
+            --build-arg VITE_SERVER_URL=https://${{ env.BACKEND_APP }}.azurewebsites.net \
+            -t ${{ env.ACR_LOGIN_SERVER }}/frontend:${{ github.sha }} \
+            ./client
+
+          docker push \
+            ${{ env.ACR_LOGIN_SERVER }}/frontend:${{ github.sha }}
+
+
+  # -----------------------------
+  # Deploy to Staging
+  # -----------------------------
+  staging:
+    name: Deploy to Staging
+    if: github.event_name == 'push'
+    needs: push
+    runs-on: ubuntu-latest
+
+    environment:
+      name: staging
+
+    steps:
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy backend
+        run: |
+          az webapp config container set \
+            --name ${{ env.BACKEND_APP }} \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --container-image-name ${{ env.ACR_LOGIN_SERVER }}/backend:${{ github.sha }} \
+            --container-registry-url https://${{ env.ACR_LOGIN_SERVER }}
+
+      - name: Deploy frontend
+        run: |
+          az webapp config container set \
+            --name ${{ env.FRONTEND_APP }} \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --container-image-name ${{ env.ACR_LOGIN_SERVER }}/frontend:${{ github.sha }} \
+            --container-registry-url https://${{ env.ACR_LOGIN_SERVER }}
+
+      - name: Restart applications
+        run: |
+          az webapp restart \
+            --name ${{ env.BACKEND_APP }} \
+            --resource-group ${{ env.RESOURCE_GROUP }}
+
+          az webapp restart \
+            --name ${{ env.FRONTEND_APP }} \
+            --resource-group ${{ env.RESOURCE_GROUP }}
+
+
+  # -----------------------------
+  # Production Deployment
+  # -----------------------------
+  production:
+    name: Production Deployment
+    if: github.event_name == 'push'
+    needs: staging
+    runs-on: ubuntu-latest
+
+    environment:
+      name: production
+
+    steps:
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy backend
+        run: |
+          az webapp config container set \
+            --name ${{ env.BACKEND_APP }} \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --container-image-name ${{ env.ACR_LOGIN_SERVER }}/backend:${{ github.sha }} \
+            --container-registry-url https://${{ env.ACR_LOGIN_SERVER }}
+
+      - name: Deploy frontend
+        run: |
+          az webapp config container set \
+            --name ${{ env.FRONTEND_APP }} \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --container-image-name ${{ env.ACR_LOGIN_SERVER }}/frontend:${{ github.sha }} \
+            --container-registry-url https://${{ env.ACR_LOGIN_SERVER }}
+
+      - name: Restart applications
+        run: |
+          az webapp restart \
+            --name ${{ env.BACKEND_APP }} \
+            --resource-group ${{ env.RESOURCE_GROUP }}
+
+          az webapp restart \
+            --name ${{ env.FRONTEND_APP }} \
+            --resource-group ${{ env.RESOURCE_GROUP }}
