@@ -75,6 +75,14 @@ resource "azurerm_linux_web_app" "backend" {
     DATABASE_URL = "postgresql://${var.db_admin_username}:${var.db_admin_password}@${azurerm_postgresql_flexible_server.main.fqdn}:5432/${var.db_name}?sslmode=require"
   }
 
+  lifecycle {
+    ignore_changes = [
+      site_config[0].application_stack[0].docker_image_name,
+      virtual_network_subnet_id,
+      app_settings["WEBSITES_ENABLE_APP_SERVICE_STORAGE"]
+    ]
+  }
+
   tags = {
     Environment = var.environment
     Project     = "fullstack-devops-assignment"
@@ -111,6 +119,12 @@ resource "azurerm_linux_web_app" "frontend" {
 
   app_settings = {
     WEBSITES_PORT = "4173"
+  }
+
+  lifecycle {
+    ignore_changes = [
+      site_config[0].application_stack[0].docker_image_name
+    ]
   }
 
   tags = {
